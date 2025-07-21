@@ -1,0 +1,7 @@
+add_subdirectory(buzzer)
+add_subdirectory(led)
+add_subdirectory(imu)
+add_subdirectory(uart)
+add_subdirectory(sbus)
+add_subdirectory(oled)
+add_subdirectory(usb)
