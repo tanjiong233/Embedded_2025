@@ -660,6 +660,10 @@ void IMU_typeC::Update() {
 
 bool IMU_typeC::DataReady() { return Temp < heater_param_.temp - 2; }
 
+const float* IMU_typeC::GetAccel() const { return BMI088_real_data_.accel; }
+const float* IMU_typeC::GetGyro() const { return BMI088_real_data_.gyro; }
+const float* IMU_typeC::GetMag() const { return IST8310_real_data_.mag; }
+
 std::map<SPI_HandleTypeDef*, IMU_typeC*> IMU_typeC::spi_ptr_map;
 
 IMU_typeC* IMU_typeC::FindInstance(SPI_HandleTypeDef* hspi) {

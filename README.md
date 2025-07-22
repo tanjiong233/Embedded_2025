@@ -20,8 +20,8 @@ sbus遥控接收功能
 
 与上位机通信功能
 
-- 上行:上位机串口库打印出来下位机发的信息(读取车的角度和速度)
-- 下行:通过上位机发送变形指令验证
+- 上行: 陀螺仪数据, 轮子里程, 系统状态 
+- 下行: 控制命令
 
 自检功能
 
@@ -47,7 +47,7 @@ sbus遥控接收功能
 
 变形控制线程 (Transform Task)
 
-- 优先级: `osPriorityAboveNormal`
+- 优先级: `osPriorityNormal`
 - 功能:
   - 监听SBUS的ch[4]（通道5）变形指令
   - 3508变形电机控制
@@ -56,26 +56,26 @@ sbus遥控接收功能
 
 吸附系统线程 (Suction Task)
 
-- 优先级: `osPriorityLow`
+- 优先级: `osPriorityNormal`
 - 功能: 根据SBUS的ch[1]（通道2）控制PWM风机
 - 延迟: 20ms
 
 上位机通信线程 (Communication Task)
 
-- 优先级: `osPriorityBelowNormal`
+- 优先级: `osPriorityNormal`
 - 功能: 串口通信（上行发送数据，下行接收指令）
 - 延迟: 50ms
 
 陀螺仪数据处理线程
 
-- 优先级: `osPriorityHigh`
+- 优先级: `osPriorityNormal`
 - 功能: 处理六轴数据解算欧拉角
 
 - 延迟: 1ms
 
 自检线程
 
-- 优先级: `osPriorityBelowNormal`
+- 优先级: `osPriorityNormal`
 - 功能: OLED显示设备在线情况, 上电开启LED流动, 蜂鸣器播放音乐
 
 - 延迟: 100ms

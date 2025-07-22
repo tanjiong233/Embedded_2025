@@ -39,22 +39,35 @@ MinipcPort::MinipcPort() {
 }
 
 void MinipcPort::Pack(uint8_t* packet, void* data, uint8_t cmd_id) {
-  switch (cmd_id) {
-    case GIMBAL_CMD_ID:
-      PackGimbalData(packet, static_cast<gimbal_data_t*>(data));
-      break;
-    case COLOR_CMD_ID:
-      PackColorData(packet, static_cast<color_data_t*>(data));
-      break;
-    case CHASSIS_CMD_ID:
-      PackChassisData(packet, static_cast<chassis_data_t*>(data));
-      break;
-    case SELFCHECK_CMD_ID:
-      PackSelfcheckData(packet, static_cast<selfcheck_data_t*>(data));
-      break;
-    case ARM_CMD_ID:
-      PackArmData(packet, static_cast<arm_data_t*>(data));
-  }
+    switch (cmd_id) {
+        case GIMBAL_CMD_ID:
+            PackGimbalData(packet, static_cast<gimbal_data_t*>(data));
+            break;
+        case COLOR_CMD_ID:
+            PackColorData(packet, static_cast<color_data_t*>(data));
+            break;
+        case CHASSIS_CMD_ID:
+            PackChassisData(packet, static_cast<chassis_data_t*>(data));
+            break;
+        case SELFCHECK_CMD_ID:
+            PackSelfcheckData(packet, static_cast<selfcheck_data_t*>(data));
+            break;
+        case ARM_CMD_ID:
+            PackArmData(packet, static_cast<arm_data_t*>(data));
+            break;
+        case IMU_CMD_ID:
+            PackIMUData(packet, static_cast<imu_data_t*>(data));
+            break;
+        case ODOMETRY_CMD_ID:
+            PackOdometryData(packet, static_cast<odometry_data_t*>(data));
+            break;
+        case SYSTEM_STATUS_CMD_ID:
+            PackSystemStatus(packet, static_cast<system_status_t*>(data));
+            break;
+        case MOTION_CMD_ID:
+            PackMotionCmd(packet, static_cast<motion_cmd_t*>(data));
+            break;
+    }
 }
 
 void MinipcPort::PackGimbalData(uint8_t* packet, gimbal_data_t* data) {
@@ -98,74 +111,135 @@ void MinipcPort::PackArmData(uint8_t* packet, arm_data_t* data) {
   AddCRC8(packet, ARM_CMD_ID);
 }
 
+void MinipcPort::PackIMUData(uint8_t* packet, imu_data_t* data) {
+    AddHeaderTail(packet, IMU_CMD_ID);
+    memcpy(&packet[0 + DATA_OFFSET], &data->accel_x, sizeof(float));
+    memcpy(&packet[4 + DATA_OFFSET], &data->accel_y, sizeof(float));
+    memcpy(&packet[8 + DATA_OFFSET], &data->accel_z, sizeof(float));
+    memcpy(&packet[12 + DATA_OFFSET], &data->gyro_x, sizeof(float));
+    memcpy(&packet[16 + DATA_OFFSET], &data->gyro_y, sizeof(float));
+    memcpy(&packet[20 + DATA_OFFSET], &data->gyro_z, sizeof(float));
+    memcpy(&packet[24 + DATA_OFFSET], &data->pitch, sizeof(float));
+    memcpy(&packet[28 + DATA_OFFSET], &data->roll, sizeof(float));
+    memcpy(&packet[32 + DATA_OFFSET], &data->yaw, sizeof(float));
+    memcpy(&packet[36 + DATA_OFFSET], &data->temperature, sizeof(float));
+    memcpy(&packet[40 + DATA_OFFSET], &data->timestamp, sizeof(uint32_t));
+    AddCRC8(packet, IMU_CMD_ID);
+}
+
+void MinipcPort::PackOdometryData(uint8_t* packet, odometry_data_t* data) {
+    AddHeaderTail(packet, ODOMETRY_CMD_ID);
+    memcpy(&packet[0 + DATA_OFFSET], &data->left_encoder, sizeof(int32_t));
+    memcpy(&packet[4 + DATA_OFFSET], &data->right_encoder, sizeof(int32_t));
+    memcpy(&packet[8 + DATA_OFFSET], &data->left_wheel_speed, sizeof(float));
+    memcpy(&packet[12 + DATA_OFFSET], &data->right_wheel_speed, sizeof(float));
+    memcpy(&packet[16 + DATA_OFFSET], &data->linear_velocity, sizeof(float));
+    memcpy(&packet[20 + DATA_OFFSET], &data->angular_velocity, sizeof(float));
+    memcpy(&packet[24 + DATA_OFFSET], &data->wheel_base, sizeof(float));
+    memcpy(&packet[28 + DATA_OFFSET], &data->wheel_radius, sizeof(float));
+    memcpy(&packet[32 + DATA_OFFSET], &data->timestamp, sizeof(uint32_t));
+    AddCRC8(packet, ODOMETRY_CMD_ID);
+}
+
+void MinipcPort::PackSystemStatus(uint8_t* packet, system_status_t* data) {
+    AddHeaderTail(packet, SYSTEM_STATUS_CMD_ID);
+    packet[0 + DATA_OFFSET] = data->robot_mode;
+    packet[1 + DATA_OFFSET] = data->transform_mode;
+
+    // 打包位域到单个字节
+    uint8_t device_status_byte = 0;
+    device_status_byte |= (data->sbus_connected & 0x1) << 0;
+    device_status_byte |= (data->imu_connected & 0x1) << 1;
+    device_status_byte |= (data->vl_motor_online & 0x1) << 2;
+    device_status_byte |= (data->vr_motor_online & 0x1) << 3;
+    device_status_byte |= (data->tf_motor_online & 0x1) << 4;
+    packet[2 + DATA_OFFSET] = device_status_byte;
+
+    packet[3 + DATA_OFFSET] = 0; // 保留字节
+    memcpy(&packet[4 + DATA_OFFSET], &data->timestamp, sizeof(uint32_t));
+    AddCRC8(packet, SYSTEM_STATUS_CMD_ID);
+}
+
+void MinipcPort::PackMotionCmd(uint8_t* packet, motion_cmd_t* data) {
+    AddHeaderTail(packet, MOTION_CMD_ID);
+    memcpy(&packet[0 + DATA_OFFSET], &data->target_linear_vel, sizeof(float));
+    memcpy(&packet[4 + DATA_OFFSET], &data->target_angular_vel, sizeof(float));
+    packet[8 + DATA_OFFSET] = data->emergency_stop;
+    packet[9 + DATA_OFFSET] = 0;  // 保留字节
+    packet[10 + DATA_OFFSET] = 0; // 保留字节
+    packet[11 + DATA_OFFSET] = 0; // 保留字节
+    memcpy(&packet[12 + DATA_OFFSET], &data->timestamp, sizeof(uint32_t)); // ✅ 修复偏移
+    AddCRC8(packet, MOTION_CMD_ID);
+}
+
 uint8_t MinipcPort::GetPacketLen(uint8_t cmd_id) {
-  // Total length = Data length + header & tail (8 bytes) + crc checksum (1 byte)
-  return CMD_TO_LEN[cmd_id] + 9;
+    // Total length = Data length + header & tail (8 bytes) + crc checksum (1 byte)
+    return CMD_TO_LEN[cmd_id] + 9;
 }
 
 void MinipcPort::ParseUartBuffer(const uint8_t* data, int32_t length) {
-  // Four cases
-  // Case 1: everything is fresh with complete package(s)
-  // Case 2: everything is fresh; package is incomplete
-  // Case 3: package contains half previous package and half new package
-  // Case 4: package contains half previous package and new package(s)
-  int i = 0;
-  if (buffer_index_ > 0) {
-    // Case 3 and 4
-    // copy the remaining bytes from previous package
-    while (i < (int)length) {
-      possible_packet[buffer_index_] = data[i];
-      // Parse possible packet if detect tail
-      if (possible_packet[buffer_index_ - 1] == 'E' &&
-          possible_packet[buffer_index_]     == 'D') {
-        buffer_index_ = 0;
-        VerifyAndParseData();
-        break;
-      }
-      buffer_index_++;
-      i++;
-      // drop packet if buffer overflow
-      if (buffer_index_ >= MAX_PACKET_LENGTH) {
-        buffer_index_ = 0;
-        break;
-      }
+    // Four cases
+    // Case 1: everything is fresh with complete package(s)
+    // Case 2: everything is fresh; package is incomplete
+    // Case 3: package contains half previous package and half new package
+    // Case 4: package contains half previous package and new package(s)
+    int i = 0;
+    if (buffer_index_ > 0) {
+        // Case 3 and 4
+        // copy the remaining bytes from previous package
+        while (i < (int)length) {
+            possible_packet[buffer_index_] = data[i];
+            // Parse possible packet if detect tail
+            if (possible_packet[buffer_index_ - 1] == 'E' &&
+                possible_packet[buffer_index_]     == 'D') {
+                buffer_index_ = 0;
+                VerifyAndParseData();
+                break;
+            }
+            buffer_index_++;
+            i++;
+            // drop packet if buffer overflow
+            if (buffer_index_ >= MAX_PACKET_LENGTH) {
+                buffer_index_ = 0;
+                break;
+            }
+        }
     }
-  }
 
-  while (i < (int)length) {
-    if (buffer_index_ == 0) {
-      if (i == (int)length - 1) {
-        // A special case to handle the last byte; buffer_index_ must be zero
-        if (data[i] == 'S') {
-          possible_packet[buffer_index_++] = data[i];
+    while (i < (int)length) {
+        if (buffer_index_ == 0) {
+            if (i == (int)length - 1) {
+                // A special case to handle the last byte; buffer_index_ must be zero
+                if (data[i] == 'S') {
+                    possible_packet[buffer_index_++] = data[i];
+                }
+                return;
+            }
+            if (data[i] == 'S' && data[i + 1] == 'T'){
+                // Detect packet head; start copying
+                possible_packet[buffer_index_++] = data[i++];
+                possible_packet[buffer_index_++] = data[i++];
+            } else {
+                i++;
+            }
+        } else {
+            possible_packet[buffer_index_] = data[i];
+            // Parse possible packet if detect tail
+            if (possible_packet[buffer_index_ - 1] == 'E' &&
+                possible_packet[buffer_index_]     == 'D') {
+                buffer_index_ = 0;
+                VerifyAndParseData();
+            } else {
+                // If not packet end, continue
+                buffer_index_++;
+                i++;
+                // drop packet if buffer overflow
+                if (buffer_index_ >= MAX_PACKET_LENGTH) {
+                    buffer_index_ = 0;
+                }
+            }
         }
-        return;
-      }
-      if (data[i] == 'S' && data[i + 1] == 'T'){
-        // Detect packet head; start copying
-        possible_packet[buffer_index_++] = data[i++];
-        possible_packet[buffer_index_++] = data[i++];
-      } else {
-        i++;
-      }
-    } else {
-      possible_packet[buffer_index_] = data[i];
-      // Parse possible packet if detect tail
-      if (possible_packet[buffer_index_ - 1] == 'E' &&
-          possible_packet[buffer_index_]     == 'D') {
-        buffer_index_ = 0;
-        VerifyAndParseData();
-      } else {
-      // If not packet end, continue
-        buffer_index_++;
-        i++;
-        // drop packet if buffer overflow
-        if (buffer_index_ >= MAX_PACKET_LENGTH) {
-          buffer_index_ = 0;
-        }
-      }
     }
-  }
 }
 
 uint8_t MinipcPort::GetCmdId(void) {
@@ -173,129 +247,165 @@ uint8_t MinipcPort::GetCmdId(void) {
 }
 
 const status_data_t* MinipcPort::GetStatus(void) {
-  return &status_;
+    return &status_;
 }
 
 uint8_t MinipcPort::GetValidFlag(void) {
-  uint8_t temp = valid_flag_;
-  valid_flag_ = 0;
-  return temp;
+    uint8_t temp = valid_flag_;
+    valid_flag_ = 0;
+    return temp;
 }
 
 uint16_t MinipcPort::GetSeqnum(void) {
-  return seqnum_;
+    return seqnum_;
 }
 
 uint32_t MinipcPort::GetValidPacketCnt(void) {
-  return valid_packet_cnt_;
+    return valid_packet_cnt_;
 }
 
 /**
- * Every function below is a private function
- */
-
+* Every function below is a private function
+*/
 
 // 8 bytes
 void MinipcPort::AddHeaderTail (uint8_t* packet, uint8_t cmd_id) {
-  // Add header
-  packet[0] = 'S';
-  packet[1] = 'T';
-  // dummy seq num
-  packet[SEQNUM_OFFSET] = 0;
-  packet[SEQNUM_OFFSET + 1] = 0 >> 8;
-  packet[DATA_LENGTH_OFFSET] = CMD_TO_LEN[cmd_id];
-  packet[CMD_ID_OFFSET] = cmd_id;
+    // Add header
+    packet[0] = 'S';
+    packet[1] = 'T';
+    // dummy seq num
+    packet[SEQNUM_OFFSET] = 0;
+    packet[SEQNUM_OFFSET + 1] = 0 >> 8;
+    packet[DATA_LENGTH_OFFSET] = CMD_TO_LEN[cmd_id];
+    packet[CMD_ID_OFFSET] = cmd_id;
 
-  // Add tail WITHOUT crc8
-  const int EOF_OFFSET = DATA_OFFSET + CMD_TO_LEN[cmd_id] + 1;
-  packet[EOF_OFFSET] = 'E';
-  packet[EOF_OFFSET + 1] = 'D';
+    // Add tail WITHOUT crc8
+    const int EOF_OFFSET = DATA_OFFSET + CMD_TO_LEN[cmd_id] + 1;
+    packet[EOF_OFFSET] = 'E';
+    packet[EOF_OFFSET + 1] = 'D';
 }
 
 // 1 bytes
 void MinipcPort::AddCRC8 (uint8_t* packet, int8_t cmd_id) {
-  const int CRC8_OFFSET = DATA_OFFSET + CMD_TO_LEN[cmd_id];
-  packet[CRC8_OFFSET] = get_crc8_check_sum(packet, CRC8_OFFSET, 0);
+    const int CRC8_OFFSET = DATA_OFFSET + CMD_TO_LEN[cmd_id];
+    packet[CRC8_OFFSET] = get_crc8_check_sum(packet, CRC8_OFFSET, 0);
 }
 
 void MinipcPort::VerifyAndParseData(void) {
-  // TODO: implement thread-safe logic here (use a lock to handle changes from interrupt)
-  // here we can assume that the package is complete
-  // in the possible_packet buffer
+    // TODO: implement thread-safe logic here (use a lock to handle changes from interrupt)
+    // here we can assume that the package is complete
+    // in the possible_packet buffer
 
-  // A minor issue with current implementation: imagine the following case:
-  //  Two packets arrive in two UART calls.
-  //  The first packet misses 1 byte, but the second one is complete.
-  //  In this case, when the possible_packet buffer is filled
-  //  (the last bytes are from the second packet), VerifyAndParseData() will be called. The whole buffer
-  //  would be tossed, resulting in two unusable packets. However, if we implement this logic, we would be
-  //  able to recover the second packet.
+    // A minor issue with current implementation: imagine the following case:
+    //  Two packets arrive in two UART calls.
+    //  The first packet misses 1 byte, but the second one is complete.
+    //  In this case, when the possible_packet buffer is filled
+    //  (the last bytes are from the second packet), VerifyAndParseData() will be called. The whole buffer
+    //  would be tossed, resulting in two unusable packets. However, if we implement this logic, we would be
+    //  able to recover the second packet.
 
-  // This is a minor issue because
-  //    1) we don't observe this even when packets are sent at 200Hz
-  //    2) probability of this happening is very low. The second packet has to be sent in two slices to
-  //       trigger this issue. (first slice: S/T is sent to possible_packet; second slide: the rest)
-  // Note: The issue discussed above might be deprecated.
+    // This is a minor issue because
+    //    1) we don't observe this even when packets are sent at 200Hz
+    //    2) probability of this happening is very low. The second packet has to be sent in two slices to
+    //       trigger this issue. (first slice: S/T is sent to possible_packet; second slide: the rest)
+    // Note: The issue discussed above might be deprecated.
 
-  // if packet Head or Tail is corrupted
-  uint8_t cmd_id = possible_packet[CMD_ID_OFFSET];
-  if (possible_packet[0] != 'S' || possible_packet[1] != 'T' ||
-      possible_packet[CMD_TO_LEN[cmd_id] + HT_LEN - 2] != 'E' ||
-      possible_packet[CMD_TO_LEN[cmd_id] + HT_LEN - 1] != 'D') {
-    valid_flag_ = 0;
-    return;
-  }
+    // if packet Head or Tail is corrupted
+    uint8_t cmd_id = possible_packet[CMD_ID_OFFSET];
+    if (possible_packet[0] != 'S' || possible_packet[1] != 'T' ||
+        possible_packet[CMD_TO_LEN[cmd_id] + HT_LEN - 2] != 'E' ||
+        possible_packet[CMD_TO_LEN[cmd_id] + HT_LEN - 1] != 'D') {
+        valid_flag_ = 0;
+        return;
+    }
 
-  // if packet crc8 checksum is valid
-  if (verify_crc8_check_sum(possible_packet, CMD_TO_LEN[cmd_id] + HT_LEN - 2)) {
-    ParseData(cmd_id);
-    valid_packet_cnt_++;
-    valid_flag_ = 1;
-  } else {
-    valid_flag_ = 0;
-  }
+    // if packet crc8 checksum is valid
+    if (verify_crc8_check_sum(possible_packet, CMD_TO_LEN[cmd_id] + HT_LEN - 2)) {
+        ParseData(cmd_id);
+        valid_packet_cnt_++;
+        valid_flag_ = 1;
+    } else {
+        valid_flag_ = 0;
+    }
 }
-
-
 
 void MinipcPort::ParseData(uint8_t cmd_id) {
-  // Update member variable
-  cmd_id_ = cmd_id;
+    // Update member variable
+    cmd_id_ = cmd_id;
 
-  // Update seqnum
-  memcpy(&seqnum_, &possible_packet[SEQNUM_OFFSET], sizeof(uint16_t));
+    // Update seqnum
+    memcpy(&seqnum_, &possible_packet[SEQNUM_OFFSET], sizeof(uint16_t));
 
-  // Update data section
-  switch (cmd_id) {
-    case GIMBAL_CMD_ID:
-      memcpy(&(status_.rel_yaw),   &possible_packet[0 + DATA_OFFSET], sizeof(float));
-      memcpy(&(status_.rel_pitch), &possible_packet[4 + DATA_OFFSET], sizeof(float));
-      status_.mode = possible_packet[8 + DATA_OFFSET];
-      status_.debug_int = possible_packet[9 + DATA_OFFSET];
-      break;
-    case COLOR_CMD_ID:
-      status_.my_color = possible_packet[DATA_OFFSET];
-      break;
-    case CHASSIS_CMD_ID:
-      memcpy(&(status_.vx), &possible_packet[0 + DATA_OFFSET], sizeof(float));
-      memcpy(&(status_.vy), &possible_packet[4 + DATA_OFFSET], sizeof(float));
-      memcpy(&(status_.vw), &possible_packet[8 + DATA_OFFSET], sizeof(float));
-      break;
-    case SELFCHECK_CMD_ID:
-      status_.mode = possible_packet[0 + DATA_OFFSET];
-      status_.debug_int = possible_packet[1 + DATA_OFFSET];
-      break;
-    case ARM_CMD_ID:
-      memcpy(&(status_.floats[0]),   &possible_packet[0 + DATA_OFFSET], sizeof(float));
-      memcpy(&(status_.floats[1]),   &possible_packet[4 + DATA_OFFSET], sizeof(float));
-      memcpy(&(status_.floats[2]),   &possible_packet[8 + DATA_OFFSET], sizeof(float));
-      memcpy(&(status_.floats[3]),   &possible_packet[12 + DATA_OFFSET], sizeof(float));
-      memcpy(&(status_.floats[4]),   &possible_packet[16 + DATA_OFFSET], sizeof(float));
-      memcpy(&(status_.floats[5]),   &possible_packet[20 + DATA_OFFSET], sizeof(float));
-      break;
-  }
+    // Update data section
+    switch (cmd_id) {
+        case GIMBAL_CMD_ID:
+            memcpy(&(status_.rel_yaw),   &possible_packet[0 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.rel_pitch), &possible_packet[4 + DATA_OFFSET], sizeof(float));
+            status_.mode = possible_packet[8 + DATA_OFFSET];
+            status_.debug_int = possible_packet[9 + DATA_OFFSET];
+            break;
+        case COLOR_CMD_ID:
+            status_.my_color = possible_packet[DATA_OFFSET];
+            break;
+        case CHASSIS_CMD_ID:
+            memcpy(&(status_.vx), &possible_packet[0 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.vy), &possible_packet[4 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.vw), &possible_packet[8 + DATA_OFFSET], sizeof(float));
+            break;
+        case SELFCHECK_CMD_ID:
+            status_.mode = possible_packet[0 + DATA_OFFSET];
+            status_.debug_int = possible_packet[1 + DATA_OFFSET];
+            break;
+        case ARM_CMD_ID:
+            memcpy(&(status_.floats[0]), &possible_packet[0 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.floats[1]), &possible_packet[4 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.floats[2]), &possible_packet[8 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.floats[3]), &possible_packet[12 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.floats[4]), &possible_packet[16 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.floats[5]), &possible_packet[20 + DATA_OFFSET], sizeof(float));
+            break;
+        case IMU_CMD_ID:
+            memcpy(&(status_.accel_x), &possible_packet[0 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.accel_y), &possible_packet[4 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.accel_z), &possible_packet[8 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.gyro_x), &possible_packet[12 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.gyro_y), &possible_packet[16 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.gyro_z), &possible_packet[20 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.pitch), &possible_packet[24 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.roll), &possible_packet[28 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.yaw), &possible_packet[32 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.imu_temperature), &possible_packet[36 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.imu_timestamp), &possible_packet[40 + DATA_OFFSET], sizeof(uint32_t));
+            break;
+
+        case ODOMETRY_CMD_ID:
+            memcpy(&(status_.left_encoder), &possible_packet[0 + DATA_OFFSET], sizeof(int32_t));
+            memcpy(&(status_.right_encoder), &possible_packet[4 + DATA_OFFSET], sizeof(int32_t));
+            memcpy(&(status_.left_wheel_speed), &possible_packet[8 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.right_wheel_speed), &possible_packet[12 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.linear_velocity), &possible_packet[16 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.angular_velocity), &possible_packet[20 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.wheel_base), &possible_packet[24 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.wheel_radius), &possible_packet[28 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.odometry_timestamp), &possible_packet[32 + DATA_OFFSET], sizeof(uint32_t));
+            break;
+
+        case SYSTEM_STATUS_CMD_ID: {
+            status_.robot_mode = possible_packet[0 + DATA_OFFSET];
+            status_.transform_mode = possible_packet[1 + DATA_OFFSET];
+            // 解包位域
+            uint8_t device_status_byte = possible_packet[2 + DATA_OFFSET];
+            status_.device_status = device_status_byte;
+            memcpy(&(status_.system_timestamp), &possible_packet[4 + DATA_OFFSET], sizeof(uint32_t));
+            break;
+        }
+        case MOTION_CMD_ID:
+            memcpy(&(status_.target_linear_vel), &possible_packet[0 + DATA_OFFSET], sizeof(float));
+            memcpy(&(status_.target_angular_vel), &possible_packet[4 + DATA_OFFSET], sizeof(float));
+            status_.emergency_stop = possible_packet[8 + DATA_OFFSET];
+            memcpy(&(status_.motion_timestamp), &possible_packet[12 + DATA_OFFSET], sizeof(uint32_t));
+            break;
+    }
 }
 
-
 }  // namespace communication
-
