@@ -57,8 +57,6 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define IN1_Pin GPIO_PIN_7
-#define IN1_GPIO_Port GPIOI
 #define IN2_Pin GPIO_PIN_6
 #define IN2_GPIO_Port GPIOI
 #define LASER_Pin GPIO_PIN_8
