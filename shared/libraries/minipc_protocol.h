@@ -132,7 +132,7 @@ typedef struct {
     uint32_t timestamp;         // 时间戳 (毫秒)
 } __packed odometry_data_t;
 
-/* ===== SYSTEM_STATUS 0x07 5Hz (8字节) ===== */
+/* ===== SYSTEM_STATUS 0x07 5Hz (7字节) ===== */
 // 系统整体状态，用于监控和诊断
 typedef struct {
     uint8_t robot_mode;         // 0:手动, 1:自动导航, 2:建图模式
@@ -256,7 +256,7 @@ class MinipcPort {
             sizeof(arm_data_t),         // ARM_CMD_ID = 24字节
             sizeof(imu_data_t),         // IMU_CMD_ID = 44字节
             sizeof(odometry_data_t),    // ODOMETRY_CMD_ID = 36字节
-            sizeof(system_status_t),    // SYSTEM_STATUS_CMD_ID = 8字节
+            sizeof(system_status_t),    // SYSTEM_STATUS_CMD_ID = 7字节
             sizeof(motion_cmd_t),       // MOTION_CMD_ID = 16字节
     };
 

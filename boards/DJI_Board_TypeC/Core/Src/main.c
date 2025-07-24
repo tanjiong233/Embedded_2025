@@ -83,7 +83,8 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  // 血与泪的教训, 外设上电没stm32快, 必须要阻塞型delay, 不然上电后需要复位才能工作
+  HAL_Delay(500);
   /* USER CODE END Init */
 
   /* Configure the system clock */

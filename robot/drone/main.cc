@@ -1,3 +1,23 @@
+/****************************************************************************
+ *                                                                          *
+ *  Copyright (C) 2023 RoboMaster.                                          *
+ *  Illini RoboMaster @ University of Illinois at Urbana-Champaign          *
+ *                                                                          *
+ *  This program is free software: you can redistribute it and/or modify    *
+ *  it under the terms of the GNU General Public License as published by    *
+ *  the Free Software Foundation, either version 3 of the License, or       *
+ *  (at your option) any later version.                                     *
+ *                                                                          *
+ *  This program is distributed in the hope that it will be useful,         *
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of          *
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the           *
+ *  GNU General Public License for more details.                            *
+ *                                                                          *
+ *  You should have received a copy of the GNU General Public License       *
+ *  along with this program. If not, see <http://www.gnu.org/licenses/>.    *
+ *                                                                          *
+ ****************************************************************************/
+
 #include "bsp_imu.h"
 #include "bsp_print.h"
 #include "cmsis_os.h"
@@ -15,56 +35,61 @@
 #include "bsp_gpio.h"
 
 //==================================================================================================
-// 全局变量定义
+// Global Variables Definition
 //==================================================================================================
 
-static remote::SBUS* sbus;        // SBUS遥控器对象
-static bsp::CAN* can1 = nullptr;  // CAN总线对象
+static remote::SBUS* sbus;        ///< SBUS remote controller object
+static bsp::CAN* can1 = nullptr;  ///< CAN bus object
 
-// 电机控制互斥锁
-static osMutexId_t motor_control_mutex;
+static osMutexId_t motor_control_mutex;  ///< Motor control mutex
 
-// 任务延迟时间定义（毫秒）- 根据README要求调整
-static const int VEHICLE_TASK_DELAY = 2;        // 车辆控制任务延时
-static const int TRANSFORM_TASK_DELAY = 10;     // 变形控制任务延时
-static const int SUCTION_TASK_DELAY = 20;       // 吸盘控制任务延时
-static const int IMU_TASK_DELAY = 1;            // IMU任务延时
-static const int SELFTEST_TASK_DELAY = 100;     // 自检任务延时
-static const int LED_TASK_DELAY = 1;            // LED任务延时
-static const int COMMUNICATION_TASK_DELAY = 50; // 通信任务延时
-static const int DEFAULT_TASK_DELAY = 100;      // 默认任务延时
+/// Task delay time definitions (milliseconds) - adjusted according to README requirements
+static const int VEHICLE_TASK_DELAY = 2;        ///< Vehicle control task delay
+static const int TRANSFORM_TASK_DELAY = 10;     ///< Transform control task delay
+static const int SUCTION_TASK_DELAY = 20;       ///< Suction control task delay
+static const int IMU_TASK_DELAY = 1;            ///< IMU task delay
+static const int SELFTEST_TASK_DELAY = 100;     ///< Self-test task delay
+static const int LED_TASK_DELAY = 1;            ///< LED task delay
+static const int COMMUNICATION_TASK_DELAY = 50; ///< Communication task delay
+static const int DEFAULT_TASK_DELAY = 100;      ///< Default task delay
 
 //==================================================================================================
-// 控制模式定义
+// Control Mode Definitions
 //==================================================================================================
 
+/**
+ * @brief Control mode enumeration
+ */
 typedef enum {
-    EMERGENCY_STOP_MODE = 0,    // 急停模式（通道6下位置）
-    REMOTE_CONTROL_MODE = 1,    // 遥控控制模式（通道6中位置）
-    COMPUTER_CONTROL_MODE = 2   // 上位机控制模式（通道6上位置）
+    EMERGENCY_STOP_MODE = 0,    ///< Emergency stop mode (channel 6 down position)
+    REMOTE_CONTROL_MODE = 1,    ///< Remote control mode (channel 6 middle position)
+    COMPUTER_CONTROL_MODE = 2   ///< Computer control mode (channel 6 up position)
 } control_mode_t;
 
+/**
+ * @brief Transform mode enumeration
+ */
 typedef enum {
-    VEHICLE_MODE = 0,           // 车载模式（通道5下位置）
-    FLIGHT_MODE = 1             // 飞行模式（通道5上位置）
+    VEHICLE_MODE = 0,           ///< Vehicle mode (channel 5 down position)
+    FLIGHT_MODE = 1             ///< Flight mode (channel 5 up position)
 } transform_mode_t;
 
-// 系统状态变量
+/// System state variables
 static control_mode_t current_control_mode = EMERGENCY_STOP_MODE;
 static control_mode_t previous_control_mode = EMERGENCY_STOP_MODE;
 static transform_mode_t current_transform_mode = VEHICLE_MODE;
 static transform_mode_t previous_transform_mode = VEHICLE_MODE;
 
-// 控制模式阈值定义
-static const int16_t MODE_UPPER_THRESHOLD = 400;   // 上位置模式阈值
-static const int16_t MODE_LOWER_THRESHOLD = -400;  // 下位置模式阈值
-static const uint32_t SBUS_TIMEOUT_MS = 500;       // SBUS超时时间
+/// Control mode threshold definitions
+static const int16_t MODE_UPPER_THRESHOLD = 400;   ///< Upper position mode threshold
+static const int16_t MODE_LOWER_THRESHOLD = -400;  ///< Lower position mode threshold
+static const uint32_t SBUS_TIMEOUT_MS = 500;       ///< SBUS timeout in milliseconds
 
 //==================================================================================================
-// 车辆控制模块
+// Vehicle Control Module
 //==================================================================================================
 
-// 车辆控制任务属性定义
+/// Vehicle control task attributes definition
 const osThreadAttr_t vehicleTaskAttribute = {
         .name = "vehicleTask",
         .attr_bits = osThreadDetached,
@@ -78,76 +103,86 @@ const osThreadAttr_t vehicleTaskAttribute = {
 };
 osThreadId_t vehicleTaskHandle;
 
-// 车辆电机对象（左轮：CAN ID 1，右轮：CAN ID 2）
-static control::MotorCANBase* left_wheel_motor = nullptr;   // 左轮电机
-static control::MotorCANBase* right_wheel_motor = nullptr;  // 右轮电机
+/// Vehicle motor objects (left wheel: CAN ID 1, right wheel: CAN ID 2)
+static control::MotorCANBase* left_wheel_motor = nullptr;   ///< Left wheel motor
+static control::MotorCANBase* right_wheel_motor = nullptr;  ///< Right wheel motor
 
-// 车辆控制参数
-static const float MAX_VEHICLE_SPEED = 5.0f;  // 最大车辆速度 (rad/s)
-static const float TURN_SENSITIVITY = 0.5f;   // 转向灵敏度系数
-static const int SBUS_MAX_VALUE = 660;        // SBUS最大通道值
-static const int SBUS_DEADZONE = 50;          // SBUS死区范围
+/// Vehicle control parameters
+static const float MAX_VEHICLE_SPEED = 5.0f;  ///< Maximum vehicle speed (rad/s)
+static const float TURN_SENSITIVITY = 0.5f;   ///< Turn sensitivity coefficient
+static const int SBUS_MAX_VALUE = 660;        ///< SBUS maximum channel value
+static const int SBUS_DEADZONE = 50;          ///< SBUS deadzone range
 
-// 电机PID控制参数
-static float left_motor_pid_params[3] = {8.0f, 0.1f, 0.0f};   // 左轮电机PID参数
-static float right_motor_pid_params[3] = {8.0f, 0.1f, 0.0f};  // 右轮电机PID参数
+/// Motor PID control parameters
+static float left_motor_pid_params[3] = {8.0f, 0.1f, 0.0f};   ///< Left wheel motor PID parameters
+static float right_motor_pid_params[3] = {8.0f, 0.1f, 0.0f};  ///< Right wheel motor PID parameters
 
-// PID控制器对象
-static control::ConstrainedPID* left_motor_pid = nullptr;   // 左轮电机PID控制器
-static control::ConstrainedPID* right_motor_pid = nullptr;  // 右轮电机PID控制器
+/// PID controller objects
+static control::ConstrainedPID* left_motor_pid = nullptr;   ///< Left wheel motor PID controller
+static control::ConstrainedPID* right_motor_pid = nullptr;  ///< Right wheel motor PID controller
 
-// 车辆运动状态变量
-static float target_linear_speed = 0.0f;    // 目标线速度
-static float target_angular_speed = 0.0f;   // 目标角速度
-static float left_wheel_speed = 0.0f;       // 左轮目标转速
-static float right_wheel_speed = 0.0f;      // 右轮目标转速
+/// Vehicle motion state variables
+static float target_linear_speed = 0.0f;    ///< Target linear velocity
+static float target_angular_speed = 0.0f;   ///< Target angular velocity
+static float left_wheel_speed = 0.0f;       ///< Left wheel target speed
+static float right_wheel_speed = 0.0f;      ///< Right wheel target speed
 
 /**
- * @brief 对SBUS输入应用死区处理
+ * @brief Apply deadzone processing to SBUS input
+ * @param input    SBUS input value
+ * @param deadzone Deadzone threshold
+ * @return         Processed input value
  */
 int16_t ApplyDeadzone(int16_t input, int16_t deadzone) {
     return (abs(input) < deadzone) ? 0 : input;
 }
 
 /**
- * @brief 将SBUS输入标准化到 [-1, 1] 范围
+ * @brief Normalize SBUS input to [-1, 1] range
+ * @param input SBUS input value
+ * @return      Normalized value in [-1, 1] range
  */
 float NormalizeSBUS(int16_t input) {
     return (float)input / SBUS_MAX_VALUE;
 }
 
 /**
- * @brief 计算差分驱动的左右轮速度
+ * @brief Calculate differential drive left and right wheel speeds
+ * @param linear_speed  Target linear speed
+ * @param angular_speed Target angular speed
+ * @param left_speed    Output left wheel speed
+ * @param right_speed   Output right wheel speed
  */
 void CalculateDifferentialSpeeds(float linear_speed, float angular_speed,
                                  float* left_speed, float* right_speed) {
-    // 差分驱动运动学：简化版本
+    // Differential drive kinematics: simplified version
     *left_speed = linear_speed - angular_speed;
     *right_speed = linear_speed + angular_speed;
 
-    // 限制速度到最大值范围内
+    // Limit speeds to maximum value range
     *left_speed = clip<float>(*left_speed, -MAX_VEHICLE_SPEED, MAX_VEHICLE_SPEED);
     *right_speed = clip<float>(*right_speed, -MAX_VEHICLE_SPEED, MAX_VEHICLE_SPEED);
 }
 
 /**
- * @brief 车辆控制任务
+ * @brief Vehicle control task
+ * @param arg Task argument (unused)
  */
 extern "C" void vehicleTask(void* arg) {
     UNUSED(arg);
 
     while (true) {
-        // 只在车载模式且遥控模式下执行车辆控制
+        // Execute vehicle control only in vehicle mode and remote control mode
         if (current_transform_mode != VEHICLE_MODE ||
             current_control_mode != REMOTE_CONTROL_MODE) {
-            // 非遥控模式时，不发送任何电机命令，避免与其他控制模式冲突
+            // In non-remote mode, don't send any motor commands to avoid conflicts with other control modes
             osDelay(VEHICLE_TASK_DELAY);
             continue;
         }
 
-        // 检查SBUS连接状态
+        // Check SBUS connection status
         if (!sbus || !sbus->connection_flag_) {
-            // SBUS未连接，停止电机
+            // SBUS not connected, stop motors
             if (left_wheel_motor) left_wheel_motor->SetOutput(0);
             if (right_wheel_motor) right_wheel_motor->SetOutput(0);
 
@@ -160,24 +195,24 @@ extern "C" void vehicleTask(void* arg) {
             continue;
         }
 
-        // 读取SBUS通道并应用死区处理
-        // 根据README：通道3为油门，通道4为转向
-        int16_t throttle_raw = ApplyDeadzone(sbus->ch[2], SBUS_DEADZONE);    // 通道3（ch[2]）
-        int16_t steering_raw = ApplyDeadzone(sbus->ch[3], SBUS_DEADZONE);    // 通道4（ch[3]）
+        // Read SBUS channels and apply deadzone processing
+        // According to README: channel 3 for throttle, channel 4 for steering
+        int16_t throttle_raw = ApplyDeadzone(sbus->ch[2], SBUS_DEADZONE);    // Channel 3 (ch[2])
+        int16_t steering_raw = ApplyDeadzone(sbus->ch[3], SBUS_DEADZONE);    // Channel 4 (ch[3])
 
-        // 将输入标准化到 [-1, 1] 范围
+        // Normalize inputs to [-1, 1] range
         float throttle = NormalizeSBUS(throttle_raw);
         float steering = NormalizeSBUS(steering_raw);
 
-        // 计算目标速度
+        // Calculate target speeds
         target_linear_speed = throttle * MAX_VEHICLE_SPEED;
         target_angular_speed = steering * MAX_VEHICLE_SPEED * TURN_SENSITIVITY;
 
-        // 计算差分驱动的左右轮速度
+        // Calculate differential drive left and right wheel speeds
         CalculateDifferentialSpeeds(target_linear_speed, target_angular_speed,
                                     &left_wheel_speed, &right_wheel_speed);
 
-        // 计算PID输出
+        // Calculate PID outputs
         if (left_wheel_motor && right_wheel_motor && left_motor_pid && right_motor_pid) {
             float left_error = left_wheel_speed - left_wheel_motor->GetOmega();
             float right_error = right_wheel_speed - right_wheel_motor->GetOmega();
@@ -185,13 +220,13 @@ extern "C" void vehicleTask(void* arg) {
             int16_t left_output = left_motor_pid->ComputeConstrainedOutput(left_error);
             int16_t right_output = right_motor_pid->ComputeConstrainedOutput(right_error);
 
-            // 使用互斥锁保护电机控制
-            if (osMutexAcquire(motor_control_mutex, 10) == osOK) {  // 10ms超时
-                // 设置电机输出
+            // Use mutex to protect motor control
+            if (osMutexAcquire(motor_control_mutex, 10) == osOK) {  // 10ms timeout
+                // Set motor outputs
                 left_wheel_motor->SetOutput(left_output);
                 right_wheel_motor->SetOutput(right_output);
 
-                // 发送CAN消息
+                // Send CAN messages
                 if (left_wheel_motor->connection_flag_ || right_wheel_motor->connection_flag_) {
                     control::MotorCANBase* motors[2] = {left_wheel_motor, right_wheel_motor};
                     control::MotorCANBase::TransmitOutput(motors, 2);
@@ -206,16 +241,16 @@ extern "C" void vehicleTask(void* arg) {
 }
 
 //==================================================================================================
-// 变形控制模块
+// Transform Control Module
 //==================================================================================================
 
-// 变形电机对象（3508：CAN ID 3）
-static control::MotorCANBase* transform_motor = nullptr;  // 变形电机
+/// Transform motor objects (3508: CAN ID 3)
+static control::MotorCANBase* transform_motor = nullptr;  ///< Transform motor
+static control::ServoMotor* transform_servo = nullptr;    ///< Transform servo motor
 
-// 电推杆GPIO控制
-static bsp::GPIO* actuator_gpio = nullptr;  // 电推杆脉冲信号GPIO (PI7)
+static bsp::GPIO* actuator_gpio = nullptr;  ///< Actuator pulse signal GPIO (PI7)
 
-// 变形控制任务属性定义
+/// Transform control task attributes definition
 const osThreadAttr_t transformTaskAttribute = {
         .name = "transformTask",
         .attr_bits = osThreadDetached,
@@ -229,65 +264,362 @@ const osThreadAttr_t transformTaskAttribute = {
 };
 osThreadId_t transformTaskHandle;
 
-// 电推杆控制参数
-static const uint32_t ACTUATOR_PULSE_WIDTH = 100;  // 脉冲宽度100ms
-static uint32_t last_actuator_pulse_time = 0;      // 上次脉冲时间
-static bool actuator_pulsing = false;              // 是否正在发送脉冲
+/**
+ * @brief Transform state enumeration
+ */
+typedef enum {
+    TRANSFORM_IDLE = 0,                    ///< Idle state
+    TRANSFORM_FORWARD_ROTATING,            ///< Forward rotation in progress (vehicle→flight)
+    TRANSFORM_ACTUATOR_EXTENDING,          ///< Actuator extension in progress
+    TRANSFORM_BACKWARD_ROTATING,           ///< Backward rotation in progress (flight→vehicle)
+    TRANSFORM_ACTUATOR_RETRACTING,         ///< Actuator retraction in progress
+    TRANSFORM_COMPLETED                    ///< Transform completed
+} transform_state_t;
 
 /**
- * @brief 发送电推杆脉冲信号
- * 电推杆逻辑：低有效脉冲，低电平持续时间至少100ms
- * 每给一次信号，状态改变：正推-停止-反拉-停止-正推 循环
+ * @brief Actuator state enumeration (push-stop-pull-stop cycle)
+ */
+typedef enum {
+    ACTUATOR_STOPPED = 0,                  ///< Stopped state
+    ACTUATOR_EXTENDING,                    ///< Extending state
+    ACTUATOR_RETRACTING                    ///< Retracting state
+} actuator_state_t;
+
+/**
+ * @brief Actuator target state enumeration
+ */
+typedef enum {
+    ACTUATOR_TARGET_NONE = 0,        ///< No target
+    ACTUATOR_TARGET_EXTENDING,       ///< Target: extending state
+    ACTUATOR_TARGET_RETRACTING      ///< Target: retracting state
+} actuator_target_t;
+
+/// Transform control parameters
+static const uint32_t ACTUATOR_PULSE_WIDTH = 100;        ///< Pulse width 100ms
+static const uint32_t ACTUATOR_OPERATION_DELAY = 5000;   ///< Actuator operation delay 5 seconds
+static const float TRANSFORM_MOTOR_SPEED = 2.0f;         ///< Transform motor speed (rad/s)
+static const float TRANSFORM_MOTOR_ACCELERATION = 10.0f; ///< Transform motor acceleration (rad/s^2)
+
+/// Transform control state variables
+static transform_state_t current_transform_state = TRANSFORM_IDLE;
+static actuator_state_t current_actuator_state = ACTUATOR_STOPPED;
+static actuator_target_t actuator_target = ACTUATOR_TARGET_NONE;
+static uint32_t last_actuator_pulse_time = 0;           ///< Last pulse time
+static uint32_t transform_operation_start_time = 0;     ///< Transform operation start time
+static bool actuator_pulsing = false;                   ///< Whether pulse is being sent
+static bool transform_motor_jammed = false;             ///< Motor jam flag
+static int actuator_pulse_count = 0;                    ///< Actuator pulse counter
+
+/**
+ * @brief Transform motor jam callback function
+ * @param servo Servo motor instance
+ * @param data  Jam data
+ */
+void transform_jam_callback(control::ServoMotor* servo, const control::servo_jam_t data) {
+    UNUSED(servo);
+    UNUSED(data);
+    transform_motor_jammed = true;
+}
+
+/**
+ * @brief Send actuator pulse signal
+ * @note Actuator logic: active low pulse, low level duration at least 100ms
+ *       Each signal changes state: push-stop-pull-stop-push cycle
  */
 void SendActuatorPulse() {
     if (!actuator_gpio || actuator_pulsing) return;
 
     actuator_pulsing = true;
     last_actuator_pulse_time = HAL_GetTick();
-    actuator_gpio->Low();  // 低有效脉冲开始
+    actuator_gpio->Low();  // Start active low pulse
+    actuator_pulse_count++;
+
+    // Update actuator state (4 state cycle: push-stop-pull-stop)
+    switch (actuator_pulse_count % 4) {
+        case 1:
+            current_actuator_state = ACTUATOR_EXTENDING;
+            break;
+        case 2:
+            current_actuator_state = ACTUATOR_STOPPED;
+            break;
+        case 3:
+            current_actuator_state = ACTUATOR_RETRACTING;
+            break;
+        case 0:
+            current_actuator_state = ACTUATOR_STOPPED;
+            break;
+    }
 }
 
 /**
- * @brief 更新电推杆脉冲状态
+ * @brief Update actuator pulse state
  */
 void UpdateActuatorPulse() {
     if (!actuator_pulsing || !actuator_gpio) return;
 
     uint32_t current_time = HAL_GetTick();
     if (current_time - last_actuator_pulse_time >= ACTUATOR_PULSE_WIDTH) {
-        actuator_gpio->High();  // 脉冲结束
+        actuator_gpio->High();  // End pulse
         actuator_pulsing = false;
     }
 }
 
 /**
- * @brief 变形控制任务
+ * @brief Start actuator retraction operation
+ */
+void StartActuatorRetraction() {
+    actuator_target = ACTUATOR_TARGET_RETRACTING;
+    transform_operation_start_time = HAL_GetTick();
+
+    // Send first pulse if needed based on current state
+    if (current_actuator_state != ACTUATOR_RETRACTING &&
+        current_actuator_state != ACTUATOR_STOPPED ||
+        (current_actuator_state == ACTUATOR_STOPPED && actuator_pulse_count % 4 != 0)) {
+        SendActuatorPulse();
+    }
+
+}
+
+/**
+ * @brief Check if actuator has reached target state
+ * @return true if target state is reached, false otherwise
+ */
+bool IsActuatorAtTarget() {
+    switch (actuator_target) {
+        case ACTUATOR_TARGET_EXTENDING:
+            return (current_actuator_state == ACTUATOR_EXTENDING ||
+                    (current_actuator_state == ACTUATOR_STOPPED && actuator_pulse_count % 4 == 2));
+        case ACTUATOR_TARGET_RETRACTING:
+            return (current_actuator_state == ACTUATOR_RETRACTING ||
+                    (current_actuator_state == ACTUATOR_STOPPED && actuator_pulse_count % 4 == 0));
+        default:
+            return true;
+    }
+}
+
+/**
+ * @brief Update actuator automatic control
+ */
+void UpdateActuatorAutoControl() {
+    // If target state is reached, no need to continue
+    if (IsActuatorAtTarget()) {
+        return;
+    }
+
+    // If currently sending pulse, wait for completion
+    if (actuator_pulsing) {
+        return;
+    }
+
+    // If there is a target state but not reached, continue sending pulses
+    if (actuator_target != ACTUATOR_TARGET_NONE) {
+        SendActuatorPulse();
+    }
+}
+
+/**
+ * @brief Start transform motor forward rotation
+ */
+void StartMotorForwardRotation() {
+    if (!transform_servo) return;
+
+    transform_motor_jammed = false;
+    float current_angle = transform_servo->GetTheta();
+    float target_angle = current_angle + 2 * PI;  // Forward rotation one turn as target
+    transform_servo->SetTarget(target_angle, true);
+}
+
+/**
+ * @brief Start transform motor backward rotation
+ */
+void StartMotorBackwardRotation() {
+    if (!transform_servo) return;
+
+    transform_motor_jammed = false;
+    float current_angle = transform_servo->GetTheta();
+    float target_angle = current_angle - 2 * PI;  // Backward rotation one turn as target
+    transform_servo->SetTarget(target_angle, true);
+}
+
+/**
+ * @brief Stop transform motor
+ */
+void StopTransformMotor() {
+    if (!transform_servo) return;
+
+    float current_angle = transform_servo->GetTheta();
+    transform_servo->SetTarget(current_angle, true);  // Set current position as target
+}
+
+/**
+ * @brief Check if actuator operation is complete
+ * @return true if operation is complete, false otherwise
+ */
+bool IsActuatorOperationComplete() {
+    uint32_t current_time = HAL_GetTick();
+    return (current_time - transform_operation_start_time >= ACTUATOR_OPERATION_DELAY);
+}
+
+/**
+ * @brief Handle transform mode change
+ */
+void HandleTransformModeChange() {
+    // Check if transform mode has changed
+    if (current_transform_mode != previous_transform_mode) {
+
+        if (previous_transform_mode == VEHICLE_MODE && current_transform_mode == FLIGHT_MODE) {
+            // Vehicle mode → Flight mode: start forward motor rotation
+            current_transform_state = TRANSFORM_FORWARD_ROTATING;
+            StartMotorForwardRotation();
+        } else if (previous_transform_mode == FLIGHT_MODE && current_transform_mode == VEHICLE_MODE) {
+            // Flight mode → Vehicle mode: start actuator retraction
+            current_transform_state = TRANSFORM_ACTUATOR_RETRACTING;
+            StartActuatorRetraction();
+        }
+
+        previous_transform_mode = current_transform_mode;
+    }
+}
+
+/**
+ * @brief Start actuator extension operation
+ */
+void StartActuatorExtension() {
+    actuator_target = ACTUATOR_TARGET_EXTENDING;
+    transform_operation_start_time = HAL_GetTick();
+
+    // Send first pulse if needed based on current state
+    if (current_actuator_state != ACTUATOR_EXTENDING &&
+        current_actuator_state != ACTUATOR_STOPPED ||
+        (current_actuator_state == ACTUATOR_STOPPED && actuator_pulse_count % 4 != 2)) {
+        SendActuatorPulse();
+    }
+}
+
+/**
+ * @brief Transform control state machine
+ */
+void TransformStateMachine() {
+    uint32_t current_time = HAL_GetTick();
+
+    switch (current_transform_state) {
+        case TRANSFORM_IDLE:
+            // Idle state, waiting for mode change
+            break;
+
+        case TRANSFORM_FORWARD_ROTATING:
+            // Forward rotation in progress, waiting for jam
+            if (transform_motor_jammed) {
+                // Jam detected, stop motor and start actuator extension
+                StopTransformMotor();
+                current_transform_state = TRANSFORM_ACTUATOR_EXTENDING;
+                StartActuatorExtension();
+            } else if (transform_servo && transform_servo->Holding()) {
+                // If motor reached target position but not jammed, continue rotation
+                float current_angle = transform_servo->GetTheta();
+                float target_angle = current_angle + 2 * PI;
+                transform_servo->SetTarget(target_angle, true);
+            }
+            break;
+
+        case TRANSFORM_ACTUATOR_EXTENDING:
+            // Actuator extension in progress
+            UpdateActuatorAutoControl();  // Automatically handle multi-step pulses
+
+            if (IsActuatorOperationComplete()) {
+                // Check if really reached extended state
+                if (IsActuatorAtTarget()) {
+                    actuator_target = ACTUATOR_TARGET_NONE;  // Clear target
+                    current_transform_state = TRANSFORM_COMPLETED;
+                }
+            }
+            break;
+
+        case TRANSFORM_BACKWARD_ROTATING:
+            // Backward rotation in progress, waiting for jam
+            if (transform_motor_jammed) {
+                // Jam detected, stop motor
+                StopTransformMotor();
+                current_transform_state = TRANSFORM_COMPLETED;
+            } else if (transform_servo && transform_servo->Holding()) {
+                // If motor reached target position but not jammed, continue rotation
+                float current_angle = transform_servo->GetTheta();
+                float target_angle = current_angle - 2 * PI;
+                transform_servo->SetTarget(target_angle, true);
+            }
+            break;
+
+        case TRANSFORM_ACTUATOR_RETRACTING:
+            // Actuator retraction in progress
+            UpdateActuatorAutoControl();  // Automatically handle multi-step pulses
+
+            if (IsActuatorOperationComplete()) {
+                // Check if really reached retracted state
+                if (IsActuatorAtTarget()) {
+                    actuator_target = ACTUATOR_TARGET_NONE;  // Clear target
+                    current_transform_state = TRANSFORM_BACKWARD_ROTATING;
+                    StartMotorBackwardRotation();
+                }
+            }
+            break;
+
+        case TRANSFORM_COMPLETED:
+            // Transform completed, return to idle state
+            actuator_target = ACTUATOR_TARGET_NONE;  // Ensure target is cleared
+            current_transform_state = TRANSFORM_IDLE;
+            break;
+    }
+}
+
+/**
+ * @brief Transform control task
+ * @param arg Task argument (unused)
  */
 extern "C" void transformTask(void* arg) {
     UNUSED(arg);
 
+    // Wait for system initialization completion
+    osDelay(1000);
+
     while (true) {
-        // 更新电推杆脉冲状态
+        // Update actuator pulse state
         UpdateActuatorPulse();
+
+        // Handle transform mode change
+        HandleTransformModeChange();
+
+        // Run transform control state machine
+        TransformStateMachine();
+
+        // Calculate transform motor output
+        if (transform_servo) {
+            transform_servo->CalcOutput();
+
+            // Send motor control commands
+            if (transform_motor && transform_motor->connection_flag_) {
+                control::MotorCANBase* motors[1] = {transform_motor};
+                control::MotorCANBase::TransmitOutput(motors, 1);
+            }
+        }
+
         osDelay(TRANSFORM_TASK_DELAY);
     }
 }
 
 //==================================================================================================
-// 吸盘控制模块
+// Suction Control Module
 //==================================================================================================
 
-// 吸盘风扇对象
-static bsp::PWM* suction_fan = nullptr;  // 吸盘风扇PWM控制器
+static bsp::PWM* suction_fan = nullptr;  ///< Suction fan PWM controller
 
-// 吸盘控制参数
-static const float MIN_FAN_PULSE_WIDTH = 1000.0f;   // 最小脉宽（微秒）- 风扇关闭
-static const float MAX_FAN_PULSE_WIDTH = 2000.0f;   // 最大脉宽（微秒）- 最大速度
-static const int SBUS_SUCTION_DEADZONE = 30;        // 吸盘通道死区
-static const uint32_t FAN_PWM_FREQUENCY = 1500;     // 风扇PWM频率 (Hz)
-static const uint32_t FAN_TIMER_CLOCK = 1000000;    // 定时器时钟频率 (1MHz)
+/// Suction control parameters
+static const float MIN_FAN_PULSE_WIDTH = 1000.0f;   ///< Minimum pulse width (microseconds) - fan off
+static const float MAX_FAN_PULSE_WIDTH = 2000.0f;   ///< Maximum pulse width (microseconds) - maximum speed
+static const int SBUS_SUCTION_DEADZONE = 30;        ///< Suction channel deadzone
+static const uint32_t FAN_PWM_FREQUENCY = 1500;     ///< Fan PWM frequency (Hz)
+static const uint32_t FAN_TIMER_CLOCK = 1000000;    ///< Timer clock frequency (1MHz)
 
-// 吸盘控制任务属性定义
+/// Suction control task attributes definition
 const osThreadAttr_t suctionTaskAttribute = {
         .name = "suctionTask",
         .attr_bits = osThreadDetached,
@@ -302,24 +634,27 @@ const osThreadAttr_t suctionTaskAttribute = {
 osThreadId_t suctionTaskHandle;
 
 /**
- * @brief 将SBUS输入映射到PWM脉宽
+ * @brief Map SBUS input to PWM pulse width
+ * @param sbus_input SBUS input value
+ * @return           Mapped pulse width
  */
 float MapSuctionToPulseWidth(int16_t sbus_input) {
-    // 只使用正值控制风扇速度（负值 = 风扇关闭）
+    // Only use positive values to control fan speed (negative values = fan off)
     if (sbus_input <= 0) {
         return MIN_FAN_PULSE_WIDTH;
     }
 
-    // 标准化到 0-1 范围
+    // Normalize to 0-1 range
     float normalized_input = (float)sbus_input / SBUS_MAX_VALUE;
     if (normalized_input > 1.0f) normalized_input = 1.0f;
 
-    // 映射到脉宽范围
+    // Map to pulse width range
     return MIN_FAN_PULSE_WIDTH + (normalized_input * (MAX_FAN_PULSE_WIDTH - MIN_FAN_PULSE_WIDTH));
 }
 
 /**
- * @brief 吸盘控制任务
+ * @brief Suction control task
+ * @param arg Task argument (unused)
  */
 extern "C" void suctionTask(void* arg) {
     UNUSED(arg);
@@ -329,32 +664,32 @@ extern "C" void suctionTask(void* arg) {
         return;
     }
 
-    // 启动PWM输出
+    // Start PWM output
     suction_fan->Start();
-    suction_fan->SetPulseWidth(MIN_FAN_PULSE_WIDTH);  // 初始化时风扇关闭
+    suction_fan->SetPulseWidth(MIN_FAN_PULSE_WIDTH);  // Initialize with fan off
 
     while (true) {
-        // 只在遥控模式下执行吸盘控制
+        // Execute suction control only in remote control mode
         if (current_control_mode != REMOTE_CONTROL_MODE) {
             suction_fan->SetPulseWidth(MIN_FAN_PULSE_WIDTH);
             osDelay(SUCTION_TASK_DELAY);
             continue;
         }
 
-        // 检查SBUS连接状态
+        // Check SBUS connection status
         if (!sbus || !sbus->connection_flag_) {
             suction_fan->SetPulseWidth(MIN_FAN_PULSE_WIDTH);
             osDelay(SUCTION_TASK_DELAY);
             continue;
         }
 
-        // 读取SBUS通道2 (ch[1])用于吸盘控制，并应用死区
+        // Read SBUS channel 2 (ch[1]) for suction control and apply deadzone
         int16_t suction_raw = ApplyDeadzone(sbus->ch[1], SBUS_SUCTION_DEADZONE);
 
-        // 将SBUS输入映射到PWM脉宽
+        // Map SBUS input to PWM pulse width
         float target_pulse_width = MapSuctionToPulseWidth(suction_raw);
 
-        // 设置风扇速度
+        // Set fan speed
         suction_fan->SetPulseWidth(target_pulse_width);
 
         osDelay(SUCTION_TASK_DELAY);
@@ -362,12 +697,12 @@ extern "C" void suctionTask(void* arg) {
 }
 
 //==================================================================================================
-// IMU模块
+// IMU Module
 //==================================================================================================
 
 #define IMU_RX_SIGNAL (1 << 1)
 
-// IMU任务属性定义
+/// IMU task attributes definition
 const osThreadAttr_t imuTaskAttribute = {
         .name = "imuTask",
         .attr_bits = osThreadDetached,
@@ -382,7 +717,7 @@ const osThreadAttr_t imuTaskAttribute = {
 osThreadId_t imuTaskHandle;
 
 /**
- * @brief 自定义IMU类
+ * @brief Custom IMU class
  */
 class IMU : public bsp::IMU_typeC {
 public:
@@ -397,29 +732,30 @@ protected:
 static IMU* imu = nullptr;
 
 /**
- * @brief IMU任务
+ * @brief IMU task
+ * @param arg Task argument (unused)
  */
 extern "C" void imuTask(void* arg) {
     UNUSED(arg);
 
     if (imu) {
-        imu->Calibrate();  // IMU校准
+        imu->Calibrate();  // IMU calibration
     }
 
     while (true) {
         uint32_t flags = osThreadFlagsWait(IMU_RX_SIGNAL, osFlagsWaitAll, osWaitForever);
         if (flags & IMU_RX_SIGNAL && imu) {
-            imu->Update();  // 更新IMU数据
+            imu->Update();  // Update IMU data
         }
         osDelay(IMU_TASK_DELAY);
     }
 }
 
 //==================================================================================================
-// 自检模块
+// Self-Test Module
 //==================================================================================================
 
-// 自检任务属性定义
+/// Self-test task attributes definition
 const osThreadAttr_t selfTestTaskAttribute = {
         .name = "selfTestTask",
         .attr_bits = osThreadDetached,
@@ -433,11 +769,11 @@ const osThreadAttr_t selfTestTaskAttribute = {
 };
 osThreadId_t selfTestTaskHandle;
 
-// 自检设备对象
+/// Self-test device objects
 static bsp::Buzzer* buzzer = nullptr;
 static display::OLED* OLED = nullptr;
 
-// 超级马里奥音乐数组
+/// Super Mario music array
 using Note = bsp::BuzzerNote;
 static bsp::BuzzerNoteDelayed Mario[] = {
         {Note::Mi3M, 80}, {Note::Silent, 80}, {Note::Mi3M, 80}, {Note::Silent, 240},
@@ -446,39 +782,40 @@ static bsp::BuzzerNoteDelayed Mario[] = {
         {Note::So5L, 80}, {Note::Silent, 0}, {Note::Finish, 0}
 };
 
-// 设备连接状态标志
-static bool left_motor_flag = false;      // 左轮电机连接状态
-static bool right_motor_flag = false;     // 右轮电机连接状态
-static bool transform_motor_flag = false; // 变形电机连接状态
-static bool sbus_flag = false;            // SBUS连接状态
-static bool computer_flag = false;        // 上位机连接状态
+/// Device connection status flags
+static bool left_motor_flag = false;      ///< Left wheel motor connection status
+static bool right_motor_flag = false;     ///< Right wheel motor connection status
+static bool transform_motor_flag = false; ///< Transform motor connection status
+static bool sbus_flag = false;            ///< SBUS connection status
+static bool computer_flag = false;        ///< Computer connection status
 
 /**
- * @brief 自检任务
+ * @brief Self-test task
+ * @param arg Task argument (unused)
  */
 extern "C" void selfTestTask(void* arg) {
     UNUSED(arg);
     osDelay(SELFTEST_TASK_DELAY);
 
     if (OLED && buzzer) {
-        // 启动画面
+        // Startup screen
         OLED->ShowIlliniRMLOGO();
         buzzer->SingSong(Mario, [](uint32_t milli) { osDelay(milli); });
         OLED->OperateGram(display::PEN_CLEAR);
         OLED->RefreshGram();
 
-        // 显示固定标签 - 重新调整位置避免覆盖
-        OLED->ShowString(0, 0, (uint8_t*)"LW");    // 左轮电机 (列0-1)
-        OLED->ShowString(0, 4, (uint8_t*)"RW");    // 右轮电机 (列4-5)
-        OLED->ShowString(0, 8, (uint8_t*)"TF");    // 变形电机 (列8-9)
-        OLED->ShowString(0, 12, (uint8_t*)"RC");   // 遥控器 (列12-13)
-        OLED->ShowString(0, 16, (uint8_t*)"PC");   // 上位机 (列16-17)
+        // Display fixed labels - readjusted positions to avoid overlap
+        OLED->ShowString(0, 0, (uint8_t*)"LW");    // Left wheel motor (column 0-1)
+        OLED->ShowString(0, 4, (uint8_t*)"RW");    // Right wheel motor (column 4-5)
+        OLED->ShowString(0, 8, (uint8_t*)"TF");    // Transform motor (column 8-9)
+        OLED->ShowString(0, 12, (uint8_t*)"RC");   // Remote controller (column 12-13)
+        OLED->ShowString(0, 16, (uint8_t*)"PC");   // Computer (column 16-17)
     }
 
     uint32_t start_time = osKernelGetTickCount();
 
     while (true) {
-        // 检测设备连接状态
+        // Detect device connection status
         if (left_wheel_motor) left_wheel_motor->connection_flag_ = false;
         if (right_wheel_motor) right_wheel_motor->connection_flag_ = false;
         if (transform_motor) transform_motor->connection_flag_ = false;
@@ -486,21 +823,21 @@ extern "C" void selfTestTask(void* arg) {
 
         osDelay(SELFTEST_TASK_DELAY);
 
-        // 读取连接状态
+        // Read connection status
         left_motor_flag = left_wheel_motor ? left_wheel_motor->connection_flag_ : false;
         right_motor_flag = right_wheel_motor ? right_wheel_motor->connection_flag_ : false;
         transform_motor_flag = transform_motor ? transform_motor->connection_flag_ : false;
         sbus_flag = sbus ? sbus->connection_flag_ : false;
 
         if (OLED) {
-            // 行0: 设备状态指示块 - 调整位置避免覆盖文字
-            OLED->ShowBlock(0, 2, left_motor_flag);      // 列2-3
-            OLED->ShowBlock(0, 6, right_motor_flag);     // 列6-7
-            OLED->ShowBlock(0, 10, transform_motor_flag); // 列10-11
-            OLED->ShowBlock(0, 14, sbus_flag);           // 列14-15
-            OLED->ShowBlock(0, 18, computer_flag);       // 列18-19
+            // Row 0: Device status indicator blocks - adjusted positions to avoid text overlap
+            OLED->ShowBlock(0, 2, left_motor_flag);      // Column 2-3
+            OLED->ShowBlock(0, 6, right_motor_flag);     // Column 6-7
+            OLED->ShowBlock(0, 10, transform_motor_flag); // Column 10-11
+            OLED->ShowBlock(0, 14, sbus_flag);           // Column 14-15
+            OLED->ShowBlock(0, 18, computer_flag);       // Column 18-19
 
-            // 行1: 控制模式 + 变形模式 + 运行时间
+            // Row 1: Control mode + Transform mode + Runtime
             const char* mode_str = current_control_mode == EMERGENCY_STOP_MODE ? "STOP" :
                                    current_control_mode == REMOTE_CONTROL_MODE ? "RC" : "PC";
             const char* transform_str = current_transform_mode == VEHICLE_MODE ? "CAR" : "FLY";
@@ -513,18 +850,18 @@ extern "C" void selfTestTask(void* arg) {
             OLED->Printf(1, 0, "M:%s T:%s %02d:%02d:%02d",
                          mode_str, transform_str, hours, minutes, seconds);
 
-            // 行2: 变形电机角度 - 修复浮点数显示
+            // Row 2: Transform motor angle - fix floating point display
             if (transform_motor && transform_motor->connection_flag_) {
-                // 转换为整数显示（保留一位小数）
+                // Convert to integer display (retain one decimal place)
                 int angle_int = (int)(transform_motor->GetTheta() * 573);  // 573 = 180*10/π
                 OLED->Printf(2, 0, "TF: %4d.%d deg", angle_int/10, abs(angle_int%10));
             } else {
                 OLED->Printf(2, 0, "TF: --- deg");
             }
 
-            // 行3: IMU欧拉角 - 修复浮点数显示
+            // Row 3: IMU Euler angles - fix floating point display
             if (imu) {
-                // 转换为整数显示（保留一位小数）
+                // Convert to integer display (retain one decimal place)
                 int pitch_int = (int)(imu->INS_angle[1] * 573);  // 573 = 180*10/π
                 int roll_int = (int)(imu->INS_angle[2] * 573);
                 int yaw_int = (int)(imu->INS_angle[0] * 573);
@@ -537,7 +874,7 @@ extern "C" void selfTestTask(void* arg) {
                 OLED->Printf(3, 0, "P:--- R:--- Y:---");
             }
 
-            // 行4: 电推杆状态
+            // Row 4: Actuator status
             OLED->Printf(2, 12, "ACT:%s", actuator_pulsing ? "PULSE" : "IDLE");
 
             OLED->RefreshGram();
@@ -548,12 +885,12 @@ extern "C" void selfTestTask(void* arg) {
 }
 
 //==================================================================================================
-// 通信模块
+// Communication Module
 //==================================================================================================
 
 #define USB_RX_SIGNAL (1 << 0)
 
-// 通信任务属性定义
+/// Communication task attributes definition
 const osThreadAttr_t communicationTaskAttribute = {
         .name = "communicationTask",
         .attr_bits = osThreadDetached,
@@ -568,7 +905,7 @@ const osThreadAttr_t communicationTaskAttribute = {
 osThreadId_t communicationTaskHandle;
 
 /**
- * @brief 自定义通信USB类
+ * @brief Custom communication USB class
  */
 class CustomCommUSB : public bsp::VirtualUSB {
 protected:
@@ -580,19 +917,145 @@ protected:
 static CustomCommUSB* comm_usb = nullptr;
 static communication::MinipcPort* minipc_session = nullptr;
 
-// 上位机连接状态检测
-static uint32_t last_pc_data_time = 0;                  // 上次收到上位机数据的时间
-static const uint32_t PC_TIMEOUT_MS = 2000;             // 上位机超时时间2秒
+/// Computer connection status detection
+static uint32_t last_pc_data_time = 0;                  ///< Last time computer data was received
+static const uint32_t PC_TIMEOUT_MS = 2000;             ///< Computer timeout 2 seconds
+
+/// Selfcheck统计变量
+static uint32_t selfcheck_tx_count = 0;        ///< Selfcheck发送计数
+static uint32_t selfcheck_rx_count = 0;        ///< Selfcheck接收计数
+static uint32_t selfcheck_error_count = 0;     ///< Selfcheck错误计数
+static uint32_t selfcheck_last_ping_time = 0;  ///< 最后PING时间
+static uint8_t selfcheck_last_ping_seq = 0;    ///< 最后PING序列号
 
 /**
- * @brief 获取系统时间戳
+ * @brief 获取状态值
+ * @param query_type 查询类型
+ * @return 对应的状态值
+ */
+uint8_t GetSelfcheckStatusValue(uint8_t query_type) {
+    switch (query_type) {
+        case 0: // 通信统计 - 返回接收计数的低8位
+            return (uint8_t)(selfcheck_rx_count & 0xFF);
+        case 1: // 系统运行时间 - 返回运行时间(秒)的低8位
+            return (uint8_t)((osKernelGetTickCount() / 1000) & 0xFF);
+        case 2: // 错误计数
+            return (uint8_t)(selfcheck_error_count & 0xFF);
+        case 3: // 发送计数
+            return (uint8_t)(selfcheck_tx_count & 0xFF);
+        case 4: // 最后PING延迟 (毫秒)
+            if (selfcheck_last_ping_time > 0) {
+                uint32_t delay = osKernelGetTickCount() - selfcheck_last_ping_time;
+                return (uint8_t)(delay > 255 ? 255 : delay);
+            }
+            return 255; // 表示无效
+        default:
+            return 0xFF; // 无效查询
+    }
+}
+
+/**
+ * @brief 执行重置操作
+ * @param reset_type 重置类型
+ * @return 重置结果 (0=成功, 非0=失败)
+ */
+uint8_t ExecuteSelfcheckReset(uint8_t reset_type) {
+    switch (reset_type) {
+        case 0: // 重置通信计数器
+            selfcheck_tx_count = 0;
+            selfcheck_rx_count = 0;
+            return 0;
+        case 1: // 重置错误计数器
+            selfcheck_error_count = 0;
+            return 0;
+        case 2: // 重置所有统计
+            selfcheck_tx_count = 0;
+            selfcheck_rx_count = 0;
+            selfcheck_error_count = 0;
+            selfcheck_last_ping_time = 0;
+            selfcheck_last_ping_seq = 0;
+            return 0;
+        default:
+            return 1; // 无效重置类型
+    }
+}
+
+/**
+ * @brief 发送selfcheck响应
+ * @param response_data 响应数据
+ */
+void SendSelfcheckResponse(const communication::selfcheck_data_t* response_data) {
+    if (!response_data || !minipc_session || !comm_usb) return;
+
+    uint8_t packet[minipc_session->MAX_PACKET_LENGTH];
+    minipc_session->Pack(packet, (void*)response_data, communication::SELFCHECK_CMD_ID);
+    comm_usb->Write(packet, minipc_session->GetPacketLen(communication::SELFCHECK_CMD_ID));
+
+    selfcheck_tx_count++;
+}
+
+/**
+ * @brief 处理selfcheck命令
+ * @param status 接收到的状态数据
+ */
+void HandleSelfcheckCommand(const communication::status_data_t* status) {
+    if (!status) return;
+
+    uint8_t mode = status->mode;
+    uint8_t debug_int = status->debug_int;
+
+    // 更新接收计数
+    selfcheck_rx_count++;
+
+    communication::selfcheck_data_t response;
+    bool send_response = true;
+
+    switch (mode) {
+        case 0: // PING测试
+            response.mode = 0;
+            response.debug_int = debug_int; // 原样返回序列号
+            selfcheck_last_ping_time = osKernelGetTickCount();
+            selfcheck_last_ping_seq = debug_int;
+            break;
+
+        case 1: // ECHO测试
+            response.mode = 1;
+            response.debug_int = debug_int; // 原样返回数据
+            break;
+
+        case 2: // STATUS查询
+            response.mode = 2;
+            response.debug_int = GetSelfcheckStatusValue(debug_int);
+            break;
+
+        case 3: // RESET命令
+            response.mode = 3;
+            response.debug_int = ExecuteSelfcheckReset(debug_int);
+            break;
+
+        default:
+            // 无效模式，记录错误但不回复
+            selfcheck_error_count++;
+            send_response = false;
+            break;
+    }
+
+    // 发送回复
+    if (send_response) {
+        SendSelfcheckResponse(&response);
+    }
+}
+
+/**
+ * @brief Get system timestamp
+ * @return Current system timestamp
  */
 uint32_t GetSystemTimestamp() {
     return osKernelGetTickCount();
 }
 
 /**
- * @brief 发送IMU数据到上位机
+ * @brief Send IMU data to computer
  */
 void SendIMUData() {
     if (!imu || !minipc_session || !comm_usb) return;
@@ -620,15 +1083,15 @@ void SendIMUData() {
 }
 
 /**
- * @brief 发送里程计数据到上位机
+ * @brief Send odometry data to computer
  */
 void SendOdometryData() {
     if (!left_wheel_motor || !right_wheel_motor || !minipc_session || !comm_usb) return;
 
     communication::odometry_data_t odom_data;
 
-    static const float WHEEL_RADIUS = 0.076f;    // 轮子半径（76mm）
-    static const float WHEEL_BASE = 0.335f;      // 轮距（335mm）
+    static const float WHEEL_RADIUS = 0.076f;    ///< Wheel radius (76mm)
+    static const float WHEEL_BASE = 0.335f;      ///< Wheel base (335mm)
 
     float left_wheel_speed = left_wheel_motor->GetOmega();
     float right_wheel_speed = right_wheel_motor->GetOmega();
@@ -638,7 +1101,7 @@ void SendOdometryData() {
 
     static int32_t left_encoder_total = 0;
     static int32_t right_encoder_total = 0;
-    left_encoder_total += (int32_t)(left_wheel_speed * 0.05f * 8192 / (2 * 3.14159f));   // 50ms周期
+    left_encoder_total += (int32_t)(left_wheel_speed * 0.05f * 8192 / (2 * 3.14159f));   // 50ms period
     right_encoder_total += (int32_t)(right_wheel_speed * 0.05f * 8192 / (2 * 3.14159f));
 
     odom_data.left_encoder = left_encoder_total;
@@ -657,7 +1120,7 @@ void SendOdometryData() {
 }
 
 /**
- * @brief 发送系统状态到上位机
+ * @brief Send system status to computer
  */
 void SendSystemStatus() {
     if (!minipc_session || !comm_usb) return;
@@ -680,7 +1143,8 @@ void SendSystemStatus() {
 }
 
 /**
- * @brief 处理接收到的运动控制指令
+ * @brief Handle received motion control commands
+ * @param status Received status data
  */
 void HandleMotionCommand(const communication::status_data_t* status) {
     if (!status || current_control_mode != COMPUTER_CONTROL_MODE) return;
@@ -688,13 +1152,13 @@ void HandleMotionCommand(const communication::status_data_t* status) {
     float target_linear = status->target_linear_vel;
     float target_angular = status->target_angular_vel;
 
-    // 紧急停止处理
+    // Emergency stop handling
     if (status->emergency_stop) {
-        if (osMutexAcquire(motor_control_mutex, 10) == osOK) {  // 10ms超时
+        if (osMutexAcquire(motor_control_mutex, 10) == osOK) {  // 10ms timeout
             if (left_wheel_motor) left_wheel_motor->SetOutput(0);
             if (right_wheel_motor) right_wheel_motor->SetOutput(0);
 
-            // 立即发送停止命令
+            // Send stop command immediately
             if (left_wheel_motor && right_wheel_motor &&
                 (left_wheel_motor->connection_flag_ || right_wheel_motor->connection_flag_)) {
                 control::MotorCANBase* motors[2] = {left_wheel_motor, right_wheel_motor};
@@ -723,12 +1187,12 @@ void HandleMotionCommand(const communication::status_data_t* status) {
         int16_t left_output = left_motor_pid->ComputeConstrainedOutput(left_error);
         int16_t right_output = right_motor_pid->ComputeConstrainedOutput(right_error);
 
-        // 使用互斥锁保护电机控制
-        if (osMutexAcquire(motor_control_mutex, 10) == osOK) {  // 10ms超时
+        // Use mutex to protect motor control
+        if (osMutexAcquire(motor_control_mutex, 10) == osOK) {  // 10ms timeout
             left_wheel_motor->SetOutput(left_output);
             right_wheel_motor->SetOutput(right_output);
 
-            // 发送CAN消息（这是之前缺失的关键代码）
+            // Send CAN messages (this was the missing critical code before)
             if (left_wheel_motor->connection_flag_ || right_wheel_motor->connection_flag_) {
                 control::MotorCANBase* motors[2] = {left_wheel_motor, right_wheel_motor};
                 control::MotorCANBase::TransmitOutput(motors, 2);
@@ -740,12 +1204,14 @@ void HandleMotionCommand(const communication::status_data_t* status) {
 }
 
 /**
- * @brief 通信任务（50ms延迟）
+ * @brief Communication task (50ms delay)
  *
- * 功能：
- * 1. 接收上位机指令并处理
- * 2. 定时发送IMU、里程计和系统状态数据
- * 3. 基于接收数据超时检测上位机连接状态
+ * Functions:
+ * 1. Receive and process computer commands
+ * 2. Send IMU, odometry and system status data periodically
+ * 3. Detect computer connection status based on data reception timeout
+ *
+ * @param arg Task argument (unused)
  */
 extern "C" void communicationTask(void* arg) {
     UNUSED(arg);
@@ -759,19 +1225,19 @@ extern "C" void communicationTask(void* arg) {
     uint32_t last_odom_send = 0;
     uint32_t last_status_send = 0;
 
-    const uint32_t IMU_SEND_PERIOD = 10;      // 10ms = 100Hz
-    const uint32_t ODOM_SEND_PERIOD = 20;     // 20ms = 50Hz
-    const uint32_t STATUS_SEND_PERIOD = 200;  // 200ms = 5Hz
+    const uint32_t IMU_SEND_PERIOD = 10;      ///< 10ms = 100Hz
+    const uint32_t ODOM_SEND_PERIOD = 20;     ///< 20ms = 50Hz
+    const uint32_t STATUS_SEND_PERIOD = 200;  ///< 200ms = 5Hz
 
     while (true) {
         uint32_t current_time = osKernelGetTickCount();
 
-        // 检查接收数据
+        // Check received data
         uint32_t flags = osThreadFlagsWait(USB_RX_SIGNAL, osFlagsWaitAny, 0);
         if (flags & USB_RX_SIGNAL && comm_usb) {
             length = comm_usb->Read(&data);
             if (length > 0 && minipc_session) {
-                // 收到数据，更新上位机数据接收时间戳
+                // Data received, update computer data reception timestamp
                 last_pc_data_time = current_time;
 
                 minipc_session->ParseUartBuffer(data, length);
@@ -785,7 +1251,7 @@ extern "C" void communicationTask(void* arg) {
                             HandleMotionCommand(status);
                             break;
                         case communication::SELFCHECK_CMD_ID:
-                            // 处理自检指令
+                            HandleSelfcheckCommand(status);
                             break;
                         default:
                             break;
@@ -794,11 +1260,11 @@ extern "C" void communicationTask(void* arg) {
             }
         }
 
-        // 基于接收数据超时判断上位机连接状态
-        // 只有在PC_TIMEOUT_MS(2秒)内收到过数据才认为上位机在线
+        // Determine computer connection status based on data reception timeout
+        // Only consider computer online if data was received within PC_TIMEOUT_MS (2 seconds)
         computer_flag = (current_time - last_pc_data_time) < PC_TIMEOUT_MS;
 
-        // 定时发送数据
+        // Send data periodically
         if (current_time - last_imu_send >= IMU_SEND_PERIOD) {
             SendIMUData();
             last_imu_send = current_time;
@@ -814,17 +1280,17 @@ extern "C" void communicationTask(void* arg) {
             last_status_send = current_time;
         }
 
-        osDelay(COMMUNICATION_TASK_DELAY);  // 50ms延迟
+        osDelay(COMMUNICATION_TASK_DELAY);  // 50ms delay
     }
 }
 
 //==================================================================================================
-// LED控制模块
+// LED Control Module
 //==================================================================================================
 
 static display::RGB* led = nullptr;
 
-// LED任务属性定义
+/// LED task attributes definition
 const osThreadAttr_t ledTaskAttribute = {
         .name = "ledTask",
         .attr_bits = osThreadDetached,
@@ -839,7 +1305,8 @@ const osThreadAttr_t ledTaskAttribute = {
 osThreadId_t ledTaskHandle;
 
 /**
- * @brief LED控制任务（RGB流水灯效果）
+ * @brief LED control task (RGB flowing light effect)
+ * @param arg Task argument (unused)
  */
 extern "C" void ledTask(void* arg) {
     UNUSED(arg);
@@ -894,19 +1361,19 @@ extern "C" void ledTask(void* arg) {
 }
 
 //==================================================================================================
-// 控制模式管理
+// Control Mode Management
 //==================================================================================================
 
 /**
- * @brief 紧急停止所有电机
+ * @brief Emergency stop all motors
  */
 void EmergencyStopAllMotors() {
-    if (osMutexAcquire(motor_control_mutex, 100) == osOK) {  // 100ms超时，紧急情况下必须获得锁
+    if (osMutexAcquire(motor_control_mutex, 100) == osOK) {  // 100ms timeout, must acquire lock in emergency
         if (left_wheel_motor) left_wheel_motor->SetOutput(0);
         if (right_wheel_motor) right_wheel_motor->SetOutput(0);
         if (transform_motor) transform_motor->SetOutput(0);
 
-        // 发送停止命令
+        // Send stop commands
         if (left_wheel_motor && right_wheel_motor &&
             (left_wheel_motor->connection_flag_ || right_wheel_motor->connection_flag_)) {
             control::MotorCANBase* motors[2] = {left_wheel_motor, right_wheel_motor};
@@ -923,7 +1390,8 @@ void EmergencyStopAllMotors() {
 }
 
 /**
- * @brief 判断当前控制模式
+ * @brief Determine current control mode
+ * @return Current control mode
  */
 control_mode_t GetControlMode() {
     if (!sbus || !sbus->connection_flag_) {
@@ -935,51 +1403,52 @@ control_mode_t GetControlMode() {
         return EMERGENCY_STOP_MODE;
     }
 
-    // 根据通道6（ch[5]）判断控制模式
+    // Determine control mode based on channel 6 (ch[5])
     int16_t mode_channel = sbus->ch[5];
 
     if (mode_channel < MODE_LOWER_THRESHOLD) {
-        return EMERGENCY_STOP_MODE;      // 急停模式
+        return EMERGENCY_STOP_MODE;      // Emergency stop mode
     } else if (mode_channel > MODE_UPPER_THRESHOLD) {
-        return COMPUTER_CONTROL_MODE;    // 上位机控制模式
+        return COMPUTER_CONTROL_MODE;    // Computer control mode
     } else {
-        return REMOTE_CONTROL_MODE;      // 遥控控制模式
+        return REMOTE_CONTROL_MODE;      // Remote control mode
     }
 }
 
 /**
- * @brief 判断当前变形模式
+ * @brief Determine current transform mode
+ * @return Current transform mode
  */
 transform_mode_t GetTransformMode() {
     if (!sbus || !sbus->connection_flag_) {
-        return VEHICLE_MODE;  // 默认车载模式
+        return VEHICLE_MODE;  // Default vehicle mode
     }
 
-    // 根据通道5（ch[4]）判断变形模式
+    // Determine transform mode based on channel 5 (ch[4])
     int16_t transform_channel = sbus->ch[4];
 
     return (transform_channel > 0) ? FLIGHT_MODE : VEHICLE_MODE;
 }
 
 /**
- * @brief 处理控制模式切换
+ * @brief Handle control mode switching
  */
 void HandleModeSwitch() {
     if (current_control_mode != previous_control_mode) {
         switch (current_control_mode) {
             case EMERGENCY_STOP_MODE:
-                // 急停模式：立即停止所有电机并重置PID
+                // Emergency stop mode: immediately stop all motors and reset PID
                 EmergencyStopAllMotors();
                 if (left_motor_pid) left_motor_pid->Reset();
                 if (right_motor_pid) right_motor_pid->Reset();
                 break;
             case REMOTE_CONTROL_MODE:
-                // 遥控模式：重置PID控制器
+                // Remote control mode: reset PID controllers
                 if (left_motor_pid) left_motor_pid->Reset();
                 if (right_motor_pid) right_motor_pid->Reset();
                 break;
             case COMPUTER_CONTROL_MODE:
-                // 上位机模式：重置PID控制器
+                // Computer control mode: reset PID controllers
                 if (left_motor_pid) left_motor_pid->Reset();
                 if (right_motor_pid) right_motor_pid->Reset();
                 break;
@@ -989,27 +1458,27 @@ void HandleModeSwitch() {
 }
 
 //==================================================================================================
-// RTOS初始化
+// RTOS Initialization
 //==================================================================================================
 
 /**
- * @brief RTOS系统和硬件初始化
+ * @brief RTOS system and hardware initialization
  */
 extern "C" void RTOS_Init() {
-    // 创建电机控制互斥锁
+    // Create motor control mutex
     motor_control_mutex = osMutexNew(NULL);
     if (motor_control_mutex == NULL) {
-        // 互斥锁创建失败，系统无法正常工作
+        // Mutex creation failed, system cannot work properly
         while(1) {
-            // 错误指示，可以添加LED闪烁或其他指示
+            // Error indication, can add LED blinking or other indication
             HAL_Delay(100);
         }
     }
 
-    // 串口打印初始化
+    // Serial print initialization
     print_use_uart(&huart1);
 
-    // IMU初始化
+    // IMU initialization
     bsp::IST8310_init_t IST8310_init;
     IST8310_init.hi2c = &hi2c3;
     IST8310_init.int_pin = DRDY_IST8310_Pin;
@@ -1041,29 +1510,47 @@ extern "C" void RTOS_Init() {
 
     imu = new IMU(imu_init, false);
 
-    // SBUS遥控器初始化
+    // SBUS remote controller initialization
     sbus = new remote::SBUS(&huart3);
 
-    // 蜂鸣器初始化
+    // Buzzer initialization
     buzzer = new bsp::Buzzer(&htim4, 3, 1000000);
 
-    // OLED显示器初始化
+    // OLED display initialization
     OLED = new display::OLED(&hi2c2, 0x3C);
 
-    // RGB LED初始化
+    // RGB LED initialization
     led = new display::RGB(&htim5, 3, 2, 1, 1000000);
 
-    // CAN总线初始化
+    // CAN bus initialization
     can1 = new bsp::CAN(&hcan1, true);
 
-    // 车辆电机初始化（左轮：CAN ID 1，右轮：CAN ID 2）
-    left_wheel_motor = new control::Motor2006(can1, 0x201);   // 左轮电机
-    right_wheel_motor = new control::Motor2006(can1, 0x202);  // 右轮电机
+    // Vehicle motor initialization (left wheel: CAN ID 1, right wheel: CAN ID 2)
+    left_wheel_motor = new control::Motor2006(can1, 0x201);   // Left wheel motor
+    right_wheel_motor = new control::Motor2006(can1, 0x202);  // Right wheel motor
 
-    // 变形电机初始化（3508：CAN ID 3）
-    transform_motor = new control::Motor3508(can1, 0x203);    // 变形电机
+    // Transform motor initialization (3508: CAN ID 3)
+    transform_motor = new control::Motor3508(can1, 0x203);    // Transform motor
 
-    // PID控制器初始化
+    // Transform motor servo initialization
+    control::servo_t transform_servo_data;
+    transform_servo_data.motor = transform_motor;
+    transform_servo_data.max_speed = TRANSFORM_MOTOR_SPEED;
+    transform_servo_data.max_acceleration = TRANSFORM_MOTOR_ACCELERATION;
+    transform_servo_data.transmission_ratio = M3508P19_RATIO;
+    transform_servo_data.omega_pid_param = new float[3]{30, 0.2, 50};
+    transform_servo_data.max_iout = 1000;
+    transform_servo_data.max_out = 8000;
+    transform_servo = new control::ServoMotor(transform_servo_data);
+
+    // Register jam detection callback, threshold set to 0.6 (adjustable based on actual conditions)
+    transform_servo->RegisterJamCallback(transform_jam_callback, 0.6);
+
+    // Actuator GPIO initialization (PI7)
+    actuator_gpio = new bsp::GPIO(GPIOI, GPIO_PIN_7);
+    actuator_gpio->High();  // Initialize to high level (inactive state)
+
+    // PID controller initialization
     left_motor_pid = new control::ConstrainedPID(left_motor_pid_params[0],
                                                  left_motor_pid_params[1],
                                                  left_motor_pid_params[2],
@@ -1074,28 +1561,24 @@ extern "C" void RTOS_Init() {
                                                   right_motor_pid_params[2],
                                                   3000.0f, 10000.0f);
 
-    // USB通信初始化
+    // USB communication initialization
     comm_usb = new CustomCommUSB();
     comm_usb->SetupRx(512);
     comm_usb->SetupTx(512);
 
-    // 初始化上位机连接状态检测
-    last_pc_data_time = 0;  // 启动时设为0，确保在未收到数据前显示为离线状态
+    // Initialize computer connection status detection
+    last_pc_data_time = 0;  // Set to 0 at startup to ensure offline display before receiving data
 
-    // 吸盘风扇PWM初始化（TIM1_CH1）
+    // Suction fan PWM initialization (TIM1_CH1)
     suction_fan = new bsp::PWM(&htim1, 1, FAN_TIMER_CLOCK, FAN_PWM_FREQUENCY, MIN_FAN_PULSE_WIDTH);
-
-    // 电推杆GPIO初始化（PI7）
-    actuator_gpio = new bsp::GPIO(GPIOI, GPIO_PIN_7);
-    actuator_gpio->High();  // 初始化为高电平（无效状态）
 }
 
 //==================================================================================================
-// RTOS任务初始化
+// RTOS Task Initialization
 //==================================================================================================
 
 /**
- * @brief 创建所有RTOS任务
+ * @brief Create all RTOS tasks
  */
 extern "C" void RTOS_Threads_Init(void) {
     imuTaskHandle = osThreadNew(imuTask, nullptr, &imuTaskAttribute);
@@ -1108,24 +1591,25 @@ extern "C" void RTOS_Threads_Init(void) {
 }
 
 //==================================================================================================
-// RTOS默认任务
+// RTOS Default Task
 //==================================================================================================
 
 /**
- * @brief RTOS默认任务 - 管理控制模式
+ * @brief RTOS default task - manage control modes
+ * @param args Task arguments (unused)
  */
 extern "C" void RTOS_Default_Task(const void* args) {
     UNUSED(args);
 
     while (true) {
-        // 获取当前控制模式和变形模式
+        // Get current control mode and transform mode
         current_control_mode = GetControlMode();
         current_transform_mode = GetTransformMode();
 
-        // 处理模式切换
+        // Handle mode switching
         HandleModeSwitch();
 
-        // 在急停模式下，持续确保所有电机停止
+        // In emergency stop mode, continuously ensure all motors are stopped
         if (current_control_mode == EMERGENCY_STOP_MODE) {
             EmergencyStopAllMotors();
         }
